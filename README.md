@@ -28,10 +28,23 @@ py -3 -m venv .venv
 
 1. 启动 AstrBot。将 `DAFEIYU_ASTRBOT_CORE` 环境变量指向包含 AstrBot `main.py` 和 `data` 的目录，再启动壁纸。
 2. 在 AstrBot 创建有聊天权限的 API 密钥，通过本地配置页保存。默认使用 AstrBot 的模型设置。需要指定提供方时，设置 `DAFEIYU_ASTRBOT_PROVIDER`。
-3. 星图会读取已安装插件的本地记忆。图片上传和部分插件记忆编辑需要通过 `DAFEIYU_ASTRBOT_MAINTENANCE_KEY` 提供有对应 `file` 或 `plugin` 权限的密钥。
+3. 建议先安装 **LivingMemory** 并聊到它生成第一条情节记忆，再打开星图。已有核心记忆或璃笺日记时，星图也会一起显示。图片上传和部分插件记忆编辑需要通过 `DAFEIYU_ASTRBOT_MAINTENANCE_KEY` 提供有对应 `file` 或 `plugin` 权限的密钥。
 4. MiniMax 和 CosyVoice 可分别在语音设置页配置。使用本地声线需要另行安装兼容的运行时和权重。
 
 程序默认只监听 `127.0.0.1:18766`。可用 `DAFEIYU_PORT` 改端口。状态默认保存于用户目录下的 `.dafeiyu-wallpaper-release`，可用 `DAFEIYU_STATE_DIR` 单独指定。每个安装会生成自己的本地连接令牌。云语音调用可能计费，截图功能会把画面随消息发给所配置的 AstrBot。
+
+## 记忆插件与人格配置
+
+| AstrBot 插件 | 星图读取的内容 |
+| --- | --- |
+| LivingMemory（`astrbot_plugin_livingmemory`） | 情节记忆、已有的情绪标签和记忆要点 |
+| 核心记忆（`astrbot_plugin_yuren_core`） | 核心、潜意识、小事三级记录 |
+| 璃笺（`astrbot_plugin_lijian`） | 未归档日记 |
+| 作息（`astrbot_plugin_yuren_night`） | 右侧面板的睡眠状态 |
+
+这些插件按需安装。没有对应数据时，星图可以打开，相应分类会为空。星图负责读取和展示；聊天时能否回忆起来，取决于 AstrBot 中实际启用的记忆检索、上下文注入和工具权限。
+
+想调自然一点的聊天语气，可以从[桌面人格书写教程](docs/persona-guide.md)开始。里面有可粘贴的模板、可选插件、语音与主动闲聊的能力边界，以及建议用来试聊的场景。
 
 ## 项目来源与发布范围
 
