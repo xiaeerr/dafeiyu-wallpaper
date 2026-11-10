@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>大肥鱼语音设置</title>
+<style>
+  body{max-width:34rem;margin:3rem auto;padding:0 1rem;background:#202a32;color:#edf3f5;font:16px/1.6 system-ui,sans-serif;color-scheme:dark}
+  form{display:grid;gap:1rem}
+  h2{margin-top:2rem}
+  label{display:grid;gap:.3rem}
+  input,select,button{font:inherit;padding:.5rem}
+  .actions{display:flex;gap:.6rem;flex-wrap:wrap}
+  .tuning{display:grid;grid-template-columns:repeat(auto-fit,minmax(8rem,1fr));gap:.6rem}
+  .tuning input{min-width:0}
+  audio{margin-top:.6rem;width:100%}
+</style>
+<h1>大肥鱼语音设置</h1>
+<p>本机声线启用后，自动朗读和普通点播优先使用「大肥鱼 · 可爱」。聊天旁的 HD 按钮单独调用 MiniMax。云端试听按对应账号的用量计费。</p>
+<h2>日常朗读 · CosyVoice v3 Flash</h2>
+<form data-provider="cosyvoice">
+  <label>北京地域业务空间 ID<input name="workspace" required maxlength="63"></label>
+  <label>阿里云百炼 API Key<input name="api_key" type="password" autocomplete="off" maxlength="2048"></label>
+  <label>音色 ID<input name="voice_id" value="longanhuan" required maxlength="128"></label>
+  <div class="actions">
+    <button type="submit" disabled>试听并启用 CosyVoice</button>
+    <button type="button" disabled>停用 CosyVoice</button>
+  </div>
+</form>
+<h2>HD 点播 · MiniMax Speech 2.8 HD</h2>
+<form data-provider="minimax">
+  <label>账号地区<select name="region"><option value="cn">中国大陆</option><option value="global">国际站</option></select></label>
+  <label>MiniMax API Key<input name="api_key" type="password" autocomplete="off" maxlength="2048"></label>
+  <label>音色 ID<input name="voice_id" value="female-shaonv" required maxlength="256"></label>
+  <div class="tuning">
+    <label>语速（1 为原速）<input name="speed" type="number" min="0.5" max="2" step="0.01" value="1" required></label>
+    <label>音高（负值更低）<input name="pitch" type="number" min="-12" max="12" step="1" value="0" required></label>
+    <label>音色（浑厚 ↔ 清脆）<input name="timbre" type="number" min="-100" max="100" step="1" value="0" required></label>
+  </div>
+  <div class="actions">
+    <button type="submit" disabled>试听并启用 MiniMax</button>
+    <button type="button" data-mode="preview" disabled>仅试听</button>
+    <button type="button" data-mode="save-tuning" disabled hidden>仅保存设置</button>
+    <button type="button" data-mode="disable" disabled>停用 MiniMax</button>
+  </div>
+</form>
+<p id="status" role="status">正在读取设置…</p>
+<audio id="preview" controls hidden></audio>
+<script src="bridge-token.js"></script>
+<script>
+  const forms=[...document.querySelectorAll('form[data-provider]')];
+  const status=document.getElementById('status');
+  const preview=document.getElementById('preview');
+  const headers={'Content-Type':'application/json','X-Wallpaper-Token':window.WALLPAPER_BRIDGE_TOKEN};
+  let previewUrl=null;
+  function setBusy(busy){for(const button of document.querySelectorAll('form button'))button.disabled=busy;}
+  async function load(){
+    const response=await fetch('/voice/settings',{headers});
+    const settings=await response.json();
+    if(!response.ok)throw Error(settings.error||'无法读取语音设置');
+    for(const form of forms){
+      const config=settings[form.dataset.provider];
+      for(const name of ['region','workspace','voice_id','speed','pitch','timbre']){
+        if(form.elements[name])form.elements[name].value=config[name];
+      }
+      form.elements.api_key.placeholder=config.has_key?'已加密保存，留空继续使用':'在这里输入密钥';
+      const save=form.querySelector('[data-mode=save-tuning]');
+      if(save){
+        save.hidden=!config.enabled;
+        form.querySelector('[type=submit]').hidden=config.enabled;
+        const submit=form.querySelector('[type=submit]');
+        const showCombined=()=>{submit.hidden=config.enabled&&!form.elements.api_key.value&&form.elements.region.value===config.region;};
+        form.elements.api_key.oninput=showCombined;
+        form.elements.region.onchange=showCombined;
+      }
+    }
+    const daily=settings.feiyu?.enabled?'本机大肥鱼 · 可爱':settings.cosyvoice.enabled?'CosyVoice':settings.minimax.enabled?'MiniMax':'Edge TTS';
+    const dual=(settings.feiyu?.enabled||settings.cosyvoice.enabled)&&settings.minimax.enabled;
+    try{localStorage.setItem('fish.voice.dual',String(dual));}catch{}
+    status.textContent='当前朗读使用 '+daily+(dual?'。HD 点播用 MiniMax。':'。');
+  }
+  async function save(form,enabled,mode='test-and-save'){
+    setBusy(true);
+    if(previewUrl){preview.pause();URL.revokeObjectURL(previewUrl);previewUrl=null;preview.hidden=true;}
+    const generatesAudio=enabled&&mode!=='save-tuning';
+    status.textContent=generatesAudio?'正在合成试听…':enabled?'正在保存…':'正在切换…';
+    const body={provider:form.dataset.provider,enabled,mode};
+    if(enabled)for(const [name,value] of new FormData(form))body[name]=value.trim();
+    try{
+      const response=await fetch('/voice/settings',{method:'POST',headers,body:JSON.stringify(body),signal:AbortSignal.timeout(35000)});
+      if(!response.ok)throw Error((await response.json()).error||'保存失败');
+      if(generatesAudio){
+        previewUrl=URL.createObjectURL(await response.blob());
+        preview.src=previewUrl;
+        preview.hidden=false;
+      }
+      if(mode==='preview'){
+        status.textContent='试听已生成。点下方播放器试听，满意后再保存。';
+      }else{
+        form.elements.api_key.value='';
+        await load();
+        if(generatesAudio)status.textContent+='。点下方播放器试听。';
+        if(mode==='save-tuning')status.textContent+='。设置已保存。';
+      }
+    }catch(error){status.textContent=error.message;}
+    finally{setBusy(false);}
+  }
+  for(const form of forms){
+    form.onsubmit=event=>{event.preventDefault();save(form,true);};
+    for(const button of form.querySelectorAll('[type=button]')){
+      button.onclick=()=>{
+        const mode=button.dataset.mode||'disable';
+        if(mode==='disable')save(form,false);
+        else if(form.reportValidity())save(form,true,mode);
+      };
+    }
+  }
+  load().then(()=>setBusy(false)).catch(error=>{status.textContent=error.message;});
+</script>
+</html>
