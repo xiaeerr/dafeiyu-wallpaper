@@ -24,6 +24,8 @@ try:
    if bridge_running():break
  if not bridge_running():raise RuntimeError('本地服务未能启动')
  import desktop_pin
+ import desktop_lifecycle
+ desktop_lifecycle.stop_competitor()
  existing=desktop_pin.pinned_hwnd()
  mode_file=data/'display-mode.json'
  try:mode=json.loads(mode_file.read_text(encoding='utf-8')).get('mode')
