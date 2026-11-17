@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
@@ -36,8 +37,14 @@ internal static class Native {
 }
 internal sealed class ChatEdit : TextBox {
  internal Action Submit;
- bool composing, swallowReturn;
+ internal Func<bool> PasteImage;
+ bool composing, swallowReturn, swallowPaste;
  protected override void WndProc(ref Message m) {
+  if(m.Msg==0x100)swallowPaste=false;
+  if(m.Msg==0x102 && m.WParam.ToInt32()==22 && swallowPaste){swallowPaste=false;return;}
+  if(!composing && (m.Msg==0x302 || (m.Msg==0x100 && m.WParam.ToInt32()==86 && ModifierKeys==Keys.Control))) {
+   if(PasteImage!=null && PasteImage()){swallowPaste=m.Msg==0x100;return;}
+  }
   if(m.Msg==0x10D) composing=true;
   if(m.Msg==0x100) {
    swallowReturn=false;
@@ -74,7 +81,9 @@ internal sealed class InputForm : Form {
  readonly bool diagnostic;
  readonly uint pid=(uint)System.Diagnostics.Process.GetCurrentProcess().Id;
  long focusSeen=-1;
- bool polling,sending;
+ bool polling,sending,dragPreview,attaching;
+ DateTime dropUntil=DateTime.MinValue;
+ const int MaxImageBytes=20*1024*1024;
  string regionKey="";
  DateTime lastGood=DateTime.UtcNow;
  readonly string statusFile=Path.Combine(DataDir,"native-input-status.json");
@@ -88,7 +97,13 @@ internal sealed class InputForm : Form {
   Color fill=Color.FromArgb(140,155,166), ink=Color.FromArgb(249,251,253);
   edit.Multiline=true; edit.AcceptsReturn=true;edit.MaxLength=600;edit.BorderStyle=BorderStyle.None;
   edit.Font=new Font("Microsoft YaHei UI",9.75f);edit.BackColor=fill;edit.ForeColor=ink;
-  edit.Submit=SubmitText; edit.ImeMode=ImeMode.NoControl;
+  edit.Submit=SubmitText;edit.PasteImage=PasteImage;edit.ImeMode=ImeMode.NoControl;
+  foreach(Control control in new Control[]{edit,editSurface,send}) {
+   control.AllowDrop=true;
+   control.DragEnter+=OfferImageDrop;
+   control.DragOver+=OfferImageDrop;
+   control.DragDrop+=DropImage;
+  }
   editSurface.BackColor=fill;editSurface.Controls.Add(edit);
   send.Text="发送";send.BackColor=fill;send.ForeColor=ink;send.FlatStyle=FlatStyle.Flat;send.FlatAppearance.BorderSize=0;
   send.UseVisualStyleBackColor=false;send.FlatAppearance.MouseOverBackColor=Color.FromArgb(147,160,170);
@@ -97,27 +112,80 @@ internal sealed class InputForm : Form {
   Deactivate+=(o,e)=>{if(!diagnostic)Hide();};
   Bounds=new Rectangle(40,40,450,100);
   if(diagnostic)LayoutInput(Bounds,new Rectangle(40,40,376,100),new Rectangle(423,40,67,100),8,8);
-  timer.Interval=150;timer.Tick+=async(o,e)=>await Poll();
+  timer.Interval=100;timer.Tick+=async(o,e)=>await Poll();
  }
  protected override CreateParams CreateParams { get {var p=base.CreateParams;if(!diagnostic)p.ExStyle|=0x80;return p;} }
+ protected override bool ShowWithoutActivation {get {return dragPreview;}}
  internal void Start(){ if(diagnostic)Show(); timer.Start(); }
  void LayoutInput(Rectangle bounds,Rectangle input,Rectangle button,int padX,int padY) {
   input.Offset(-bounds.X,-bounds.Y);button.Offset(-bounds.X,-bounds.Y);
   editSurface.Bounds=input;send.Bounds=button;
   edit.SetBounds(padX,padY,Math.Max(1,input.Width-2*padX),Math.Max(1,input.Height-2*padY));
  }
- string Request(string path,string body,bool typing=false) {
+ string Request(string path,string body,bool typing=false,byte[] image=null) {
   var r=(HttpWebRequest)WebRequest.Create("http://127.0.0.1:"+Port+path);
   r.Proxy=null;r.Timeout=1600;r.ReadWriteTimeout=1600;r.Headers.Add("X-Wallpaper-Token",token);
   if(path=="/desktop/status"&&!diagnostic)r.Headers.Add("X-Dafeiyu-Typing",typing?"1":"0");
-  if(body!=null) {
-   var bytes=Encoding.UTF8.GetBytes(body);r.Method="POST";r.ContentType="application/json";r.ContentLength=bytes.Length;
+  if(body!=null||image!=null) {
+   var bytes=image??Encoding.UTF8.GetBytes(body);r.Method="POST";
+   r.ContentType=image==null?"application/json":"application/octet-stream";
+   r.ContentLength=bytes.Length;
    using(var s=r.GetRequestStream())s.Write(bytes,0,bytes.Length);
   }
   using(var response=r.GetResponse())using(var reader=new StreamReader(response.GetResponseStream(),Encoding.UTF8))return reader.ReadToEnd();
  }
+ static string FindImageFile(string[] paths) {
+  if(paths==null)return null;
+  foreach(string path in paths) {
+   if(Regex.IsMatch(Path.GetExtension(path),@"^\.(png|jpe?g|gif|webp|bmp|avif|ico|tiff?)$",RegexOptions.IgnoreCase))
+    return path;
+  }
+  return null;
+ }
+ static byte[] ReadImageFile(string path) {
+  var info=new FileInfo(path);
+  if(info.Length>MaxImageBytes)throw new IOException("图片不能超过 20 MB");
+  return File.ReadAllBytes(path);
+ }
+ void OfferImageDrop(object sender,DragEventArgs args) {
+  bool allowed=args.Data!=null&&args.Data.GetDataPresent(DataFormats.FileDrop);
+  args.Effect=allowed?DragDropEffects.Copy:DragDropEffects.None;
+  if(allowed)dropUntil=DateTime.UtcNow.AddMilliseconds(450);
+ }
+ void DropImage(object sender,DragEventArgs args) {
+  string path=FindImageFile(args.Data.GetData(DataFormats.FileDrop) as string[]);
+  dropUntil=DateTime.MinValue;
+  if(path==null){send.Text="图片无效";return;}
+  AttachImage(()=>ReadImageFile(path));
+ }
+ bool PasteImage() {
+  try {
+   if(Clipboard.ContainsFileDropList()){
+    var entries=Clipboard.GetFileDropList();
+    var paths=new string[entries.Count];entries.CopyTo(paths,0);
+    var path=FindImageFile(paths);
+    if(path!=null){AttachImage(()=>ReadImageFile(path));return true;}
+   }
+   if(!Clipboard.ContainsImage())return false;
+   using(var bitmap=Clipboard.GetImage())
+   using(var stream=new MemoryStream()) {
+    if(bitmap==null)return false;
+    bitmap.Save(stream,ImageFormat.Png);
+    var bytes=stream.ToArray();
+    AttachImage(()=>bytes);
+    return true;
+   }
+  }catch(ExternalException){return false;}
+ }
+ async void AttachImage(Func<byte[]> read) {
+  if(attaching||sending)return;
+  attaching=true;send.Enabled=false;send.Text="载入…";
+  try{await Task.Run(()=>Request("/desktop/attach",null,image:read()));send.Text="发送";}
+  catch{send.Text="图片无效";}
+  finally{attaching=false;send.Enabled=true;}
+ }
  async void SubmitText() {
-  if(sending || string.IsNullOrWhiteSpace(edit.Text))return;
+  if(sending||attaching)return;
   string draft=edit.Text;
   var payload=json.Serialize(new{message=draft.Trim()});
   sending=true;send.Enabled=false;send.Text="…";
@@ -146,12 +214,12 @@ internal sealed class InputForm : Form {
   },IntPtr.Zero);
   return cuts;
  }
- void Place(Rectangle bounds,Rectangle input,Rectangle button,int padX,int padY,bool wanted) {
+ void Place(Rectangle bounds,Rectangle input,Rectangle button,int padX,int padY,bool refreshClip,bool wanted) {
   bool moved=Bounds!=bounds;
   if(moved)Bounds=bounds;
   LayoutInput(bounds,input,button,padX,padY);
   // An idle editor never sits above other apps. Clip only when opening or relocating it.
-  if(wanted||moved||!Visible) {
+  if(refreshClip||moved||!Visible) {
    var cuts=Covering(bounds);
    string key=bounds.ToString()+string.Join(";",cuts);
    if(key!=regionKey) {
@@ -213,8 +281,13 @@ internal sealed class InputForm : Form {
    }
    bool available=input.Width>0&&input.Height>0&&button.Width>0&&button.Height>0;
    var bounds=available?Rectangle.Union(input,button):Rectangle.Empty;
-   if(available&&(wanted||(Visible&&Native.GetForegroundWindow()==Handle))) {
-    Place(bounds,input,button,(int)Math.Round(8*sx),(int)Math.Round(8*sy),wanted);
+   if(Flag(state,"dropInput"))dropUntil=DateTime.UtcNow.AddMilliseconds(450);
+   bool focused=Visible&&Native.GetForegroundWindow()==Handle;
+   bool wasPreview=dragPreview;
+   dragPreview=!wanted&&!focused&&DateTime.UtcNow<dropUntil;
+   if(available&&(wanted||focused||dragPreview)) {
+    if(dragPreview&&!wasPreview)regionKey="";
+    Place(bounds,input,button,(int)Math.Round(8*sx),(int)Math.Round(8*sy),wanted||dragPreview&&!wasPreview, wanted);
    } else if(Visible)Hide();
    ReportStatus(bounds,input,button);
   } catch { if(!diagnostic&&Visible&&(DateTime.UtcNow-lastGood).TotalSeconds>3)Hide(); }

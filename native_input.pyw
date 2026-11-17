@@ -1,5 +1,5 @@
 """Borderless native IME surface aligned exactly with the wallpaper chat form."""
-import ctypes,ctypes.wintypes as W,json,re,threading,time,tkinter as tk,urllib.request,sys
+import ctypes,ctypes.wintypes as W,io,json,re,threading,time,tkinter as tk,urllib.request,sys
 DIAGNOSTIC="--diagnose-input" in sys.argv
 from pathlib import Path
 try:ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -8,9 +8,10 @@ u=ctypes.windll.user32;u.GetForegroundWindow.restype=W.HWND;u.GetAncestor.argtyp
 u.SetWindowPos.argtypes=[W.HWND,W.HWND,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,W.UINT]
 from data_paths import ORIGIN, PORT, STATE, TOKEN_FILE
 token=TOKEN_FILE.read_text(encoding='ascii').strip()
-def request(path,payload=None):
- data=None if payload is None else json.dumps(payload,ensure_ascii=False).encode()
- req=urllib.request.Request(ORIGIN+path,data=data,headers={'Content-Type':'application/json','X-Wallpaper-Token':token})
+def request(path,payload=None,raw=None):
+ data=raw if raw is not None else None if payload is None else json.dumps(payload,ensure_ascii=False).encode()
+ mime='application/octet-stream' if raw is not None else 'application/json'
+ req=urllib.request.Request(ORIGIN+path,data=data,headers={'Content-Type':mime,'X-Wallpaper-Token':token})
  with urllib.request.urlopen(req,timeout=2) as res:return json.load(res)
 k=ctypes.windll.kernel32;k.CreateMutexW.argtypes=[ctypes.c_void_p,W.BOOL,W.LPCWSTR];k.CreateMutexW.restype=W.HANDLE
 mutex=k.CreateMutexW(None,False,f'Local\\DafeiyuNativeInputRelease{PORT}')
@@ -46,7 +47,7 @@ def send(event=None):
  finally:
   if context:im.ImmReleaseContext(t.winfo_id(),context)
  text=t.get('1.0','end-1c').strip()
- if not text or sending:return 'break'
+ if sending:return 'break'
  if len(text)>600:b.config(text='太长');return 'break'
  sending=True;b.config(state='disabled',text='…')
  def work():
@@ -55,6 +56,41 @@ def send(event=None):
   try:r.after(1200,lambda:done(ok))
   except Exception:pass
  threading.Thread(target=work,daemon=True).start();return 'break'
+def attach_image(read):
+ global sending
+ if sending:
+  return
+ sending=True;b.config(state='disabled',text='载入…')
+ def work():
+  try:request('/desktop/attach',raw=read());label='发送'
+  except Exception:label='图片无效'
+  def finish():
+   global sending
+   sending=False;b.config(state='normal',text=label)
+  r.after(0,finish)
+ threading.Thread(target=work,daemon=True).start()
+
+def read_image_file(path):
+ if path.stat().st_size>20*1024*1024:raise ValueError('图片不能超过 20 MB')
+ return path.read_bytes()
+
+def paste_image(event):
+ from PIL import Image,ImageGrab
+ try:payload=ImageGrab.grabclipboard()
+ except OSError:return
+ if isinstance(payload,list):
+  path=next((Path(name) for name in payload if Path(name).suffix.lower() in {'.png','.jpg','.jpeg','.gif','.webp','.bmp','.avif','.ico','.tif','.tiff'}),None)
+  if path is None:return
+  attach_image(lambda:read_image_file(path))
+ elif isinstance(payload,Image.Image):
+  def read():
+   with payload,io.BytesIO() as output:
+    payload.save(output,format='PNG');return output.getvalue()
+  attach_image(read)
+ else:return
+ return 'break'
+
+t.bind('<<Paste>>',paste_image)
 t.bind('<Return>',send);b.config(command=send)
 def tick():
  global rect,focus_seen,last_status

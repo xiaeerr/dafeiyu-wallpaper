@@ -1,4 +1,4 @@
-import ctypes, ctypes.wintypes, hashlib, json, os, re, secrets, sqlite3, threading, time, urllib.request, urllib.error, urllib.parse, uuid, webbrowser, subprocess, sys, mimetypes, base64, io
+import ctypes, ctypes.wintypes, hashlib, json, os, re, secrets, sqlite3, threading, time, urllib.request, urllib.error, urllib.parse, uuid, webbrowser, subprocess, sys, mimetypes, base64, io, queue
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from collections import OrderedDict
@@ -14,7 +14,9 @@ voice_lock=threading.Lock()
 voice_slots=threading.BoundedSemaphore(2)
 voice_cache=OrderedDict()
 input_active_until=0.0
-input_commands=__import__("queue").Queue(maxsize=10)
+input_commands=queue.Queue(maxsize=10)
+hotkey_capture_lock=threading.Lock()
+MAX_NATIVE_IMAGE_BYTES=20*1024*1024
 from data_paths import STATE, PROFILES, PORT, ORIGIN, TOKEN_FILE, edge_executable
 DATA=STATE; DATA.mkdir(exist_ok=True)
 CHAT_SETTINGS=DATA/'chat-settings.json'
@@ -231,6 +233,39 @@ def desktop_voice_intent(message,data,streaming):
   return 'choose','automatic' if data.get('auto_voice') is True else ''
  if streaming and data.get('auto_voice') is True:return 'text','automatic'
  return 'text',''
+
+def jpeg_bytes(picture,limit):
+ picture.thumbnail(limit)
+ output=io.BytesIO()
+ if 'A' in picture.getbands() or 'transparency' in picture.info:
+  from PIL import Image
+  rgba=picture.convert('RGBA')
+  rgb=Image.new('RGB',rgba.size,'white')
+  rgb.paste(rgba,mask=rgba.getchannel('A'))
+ else:
+  rgb=picture.convert('RGB')
+ rgb.save(output,format='JPEG',quality=82)
+ return output.getvalue()
+
+def capture_desktop():
+ from PIL import ImageGrab
+ with ImageGrab.grab(all_screens=True) as picture:
+  return jpeg_bytes(picture,(1920,1080))
+
+def screenshot_hotkey():
+ if not desktop_input.target()[0] or not hotkey_capture_lock.acquire(False):return
+ def capture():
+  try:
+   image=base64.b64encode(capture_desktop()).decode('ascii')
+   input_commands.put_nowait({'kind':'screenshot','image':image})
+  except queue.Full:
+   pass
+  except Exception:
+   try:input_commands.put_nowait({'kind':'error','message':'桌面截图失败'})
+   except queue.Full:pass
+  finally:
+   hotkey_capture_lock.release()
+ threading.Thread(target=capture,daemon=True,name='wallpaper-screenshot-hotkey').start()
 
 def upload_image(image):
  raw=base64.b64decode(image,validate=True)
@@ -450,12 +485,12 @@ class Handler(BaseHTTPRequestHandler):
    commands=[]
    while not input_commands.empty():
     try:commands.append(input_commands.get_nowait())
-    except __import__('queue').Empty:break
+    except queue.Empty:break
    self.reply(200,{'commands':commands,'typing':time.monotonic()<input_active_until});return
   if self.path=='/desktop/status' and self.authorized():
    typing=self.headers.get('X-Dafeiyu-Typing')
    if typing in ('0','1'):input_active_until=time.monotonic()+2 if typing=='1' else 0
-   self.reply(200,{'hook':bool(desktop_input.hook),'regions':len(desktop_input.regions),'target':bool(desktop_input.cache[2]),'state':{**desktop_input.state,'focusRequest':desktop_input.focus_request},'viewport':desktop_input.viewport,'fullscreen':fullscreen_state.active});return
+   self.reply(200,{'hook':bool(desktop_input.hook),'regions':len(desktop_input.regions),'target':bool(desktop_input.cache[2]),'state':{**desktop_input.state,'focusRequest':desktop_input.focus_request,'dropInput':desktop_input.drop_input_active()},'screenshotHotkey':desktop_input.hotkey_registered,'viewport':desktop_input.viewport,'fullscreen':fullscreen_state.active});return
   if self.path=='/desktop/pointer' and self.authorized():
    self.reply(200,desktop_input.pointer_snapshot());return
   if self.path=='/memory/data':
@@ -493,11 +528,7 @@ class Handler(BaseHTTPRequestHandler):
       if time.monotonic()-last_auto_screen<seconds:
        self.reply(429,{'error':'主动截图间隔尚未结束'});return
       last_auto_screen=time.monotonic()
-    from PIL import ImageGrab
-    image=ImageGrab.grab(all_screens=True)
-    image.thumbnail((1920,1080))
-    output=io.BytesIO();image.convert('RGB').save(output,format='JPEG',quality=82)
-    raw=output.getvalue()
+    raw=capture_desktop()
     self.send_response(200);self.send_header('Content-Type','image/jpeg');self.send_header('Content-Length',str(len(raw)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(raw)
    except Exception:self.reply(500,{'error':'桌面截图失败'});
    return
@@ -510,6 +541,20 @@ class Handler(BaseHTTPRequestHandler):
   if not self.authorized():self.reply(403,{'error':'来源或令牌无效'},cors);return
   try:
    n=int(self.headers.get('Content-Length','0'))
+   if self.path=='/desktop/attach':
+    if not 0<n<=MAX_NATIVE_IMAGE_BYTES:
+     self.reply(400,{'error':'请选择 20 MB 以内的图片'},cors);return
+    try:
+     from PIL import Image, ImageOps
+     with Image.open(io.BytesIO(self.rfile.read(n))) as picture:
+      if picture.width*picture.height>50_000_000:raise ValueError('图片尺寸过大')
+      raw=jpeg_bytes(ImageOps.exif_transpose(picture),(1600,1600))
+     input_commands.put_nowait({'kind':'image','image':base64.b64encode(raw).decode('ascii')})
+    except queue.Full:
+     self.reply(429,{'error':'图片操作太多，请稍后重试'},cors);return
+    except (OSError,ValueError,Image.DecompressionBombError):
+     self.reply(400,{'error':'无法读取这张图片'},cors);return
+    self.reply(200,{'ok':True},cors);return
    limit=8*1024*1024 if self.path in ('/chat','/chat/stream') else (65536 if self.path in ('/memory/edit','/desktop/regions') else 8192)
    if n<=0 or n>limit:raise ValueError('请求大小无效')
    data=json.loads(self.rfile.read(n))
@@ -658,10 +703,10 @@ class Handler(BaseHTTPRequestHandler):
    return
   if self.path=='/desktop/focus-input':desktop_input.focus_request=time.monotonic_ns();self.reply(200,{'ok':True});return
   if self.path=='/desktop/submit':
-   text=str(data.get('message','')).strip()
-   if not text or len(text)>600:self.reply(400,{'error':'消息长度无效'});return
-   try:input_commands.put_nowait(text);self.reply(200,{'ok':True})
-   except __import__('queue').Full:self.reply(429,{'error':'请等待上一条消息'} )
+   text=data.get('message','')
+   if not isinstance(text,str) or len(text)>600:self.reply(400,{'error':'消息长度无效'});return
+   try:input_commands.put_nowait({'kind':'send','text':text.strip()});self.reply(200,{'ok':True})
+   except queue.Full:self.reply(429,{'error':'请等待上一条消息'})
    return
   if self.path=='/desktop/regions':
    try:desktop_input.update(data);self.reply(200,{'ok':True,'fullscreen':fullscreen_state.active})
@@ -702,7 +747,7 @@ class Handler(BaseHTTPRequestHandler):
    entry=('互动' if data.get('automatic') else '我',label or message)
    allow_silence=bool(data.get('silent_ok'))
    attachment_id=upload_image(image) if image else None
-   if attachment_id and streaming:emit({'image_received':True})
+   if attachment_id and streaming:emit({'image_uploaded':True})
    if not allow_silence:add(entry)
    mode,voice_intent=desktop_voice_intent(message,data,streaming)
    voice_context=DATA/'voice-turn.json'
@@ -730,8 +775,10 @@ class Handler(BaseHTTPRequestHandler):
     if streaming:emit({'done':True,**result})
     else:self.reply(200,result,cors)
   except urllib.error.HTTPError as e:
-   if streaming:emit({'error':'AstrBot 返回 HTTP '+str(e.code)+'，请检查密钥'})
-   else:self.reply(502,{'error':'AstrBot 返回 HTTP '+str(e.code)+'，请检查密钥'},cors)
+   hint='，请检查密钥' if e.code in (401,403) else ''
+   error='AstrBot 返回 HTTP '+str(e.code)+hint
+   if streaming:emit({'error':error})
+   else:self.reply(502,{'error':error},cors)
   except (urllib.error.URLError,TimeoutError):
    if streaming:emit({'error':'AstrBot 暂时断开，正在自动重连，请稍后再发送'})
    else:self.reply(502,{'error':'AstrBot 暂时断开，正在自动重连，请稍后再发送'},cors)
@@ -753,7 +800,7 @@ if __name__=='__main__':
    super().server_bind()
  server=ExclusiveServer(('127.0.0.1',PORT),Handler)
  astrbot_connection.start(lambda:key,session)
- desktop_input.start()
+ desktop_input.start(screenshot_hotkey)
  fullscreen_state.start(local_voice.release_idle)
  import service_diagnostics
  service_diagnostics.start(DATA)

@@ -14,6 +14,9 @@ u.WindowFromPoint.argtypes=[Point];u.WindowFromPoint.restype=W.HWND
 u.GetAncestor.argtypes=[W.HWND,W.UINT];u.GetAncestor.restype=W.HWND
 u.PostMessageW.argtypes=[W.HWND,W.UINT,W.WPARAM,W.LPARAM]
 u.ScreenToClient.argtypes=[W.HWND,ctypes.POINTER(Point)]
+u.RegisterHotKey.argtypes=[W.HWND,ctypes.c_int,W.UINT,W.UINT]
+u.RegisterHotKey.restype=W.BOOL
+u.UnregisterHotKey.argtypes=[W.HWND,ctypes.c_int]
 u.SetFocus.argtypes=[W.HWND];u.SetFocus.restype=W.HWND
 u.SetForegroundWindow.argtypes=[W.HWND];u.SetForegroundWindow.restype=W.BOOL
 u.GetForegroundWindow.restype=W.HWND
@@ -23,6 +26,9 @@ regions=[];wheel_regions=[];viewport=(1,1);updated=0;state={};captured=False;eve
 cache=(0,None,None)
 focus_request=0;native_capture=False
 passthrough_press=None
+drop_over_input=False
+hotkey_registered=False
+SCREENSHOT_HOTKEY=1
 icons_dirty_at=0
 icon_snapshot=(0,None)
 
@@ -124,6 +130,21 @@ def in_region(pt,wheel=False):
  if time.monotonic()-updated>10:return False
  x=pt.x*viewport[0]/u.GetSystemMetrics(0);y=pt.y*viewport[1]/u.GetSystemMetrics(1)
  return any(rx<=x<=rx+rw and ry<=y<=ry+rh for rx,ry,rw,rh in (wheel_regions if wheel else regions))
+def drop_input_active():
+ global drop_over_input
+ if (passthrough_press!='window' or time.monotonic()-updated>10
+     or any(state.get(flag) for flag in ('memoryOpen','settingsOpen','chatSettingsOpen'))):
+  drop_over_input=False
+  return False
+ pt=Point()
+ if not u.GetCursorPos(ctypes.byref(pt)):return False
+ field=next((item for item in state.get('targets',[]) if item.get('id')=='fishInput'),None)
+ x=pt.x*viewport[0]/u.GetSystemMetrics(0)
+ y=pt.y*viewport[1]/u.GetSystemMetrics(1)
+ inside=field and field['w']>0 and field['h']>0 and field['x']<=x<field['x']+field['w'] and field['y']<=y<field['y']+field['h']
+ drop_over_input=bool(inside and (drop_over_input or desktop_point(pt) and not shell_has_priority(pt)))
+ return drop_over_input
+
 def pointer_snapshot():
  pt=Point()
  if not u.GetCursorPos(ctypes.byref(pt)):return {'x':-1,'y':-1,'over':False}
@@ -140,8 +161,8 @@ def worker():
   else:
    u.ScreenToClient(widget,ctypes.byref(p));lp=(p.x&65535)|((p.y&65535)<<16);wp=buttons
   u.PostMessageW(widget,msg,wp,lp)
-def run():
- global callback,hook,captured
+def run(on_screenshot):
+ global callback,hook,captured,hotkey_registered
  @PROC
  def cb(code,msg,param):
   global captured,focus_request,native_capture,passthrough_press,icons_dirty_at
@@ -191,10 +212,21 @@ def run():
   except Exception:captured=False
   return u.CallNextHookEx(hook,code,msg,param)
  callback=cb;hook=u.SetWindowsHookExW(14,callback,None,0)
- if not hook:return
+ # MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, virtual key W.
+ hotkey_registered=bool(u.RegisterHotKey(None,SCREENSHOT_HOTKEY,0x4005,ord('W')))
+ if not hook and not hotkey_registered:return
  m=W.MSG()
- while u.GetMessageW(ctypes.byref(m),None,0,0)>0:u.TranslateMessage(ctypes.byref(m));u.DispatchMessageW(ctypes.byref(m))
-def start():
+ try:
+  while u.GetMessageW(ctypes.byref(m),None,0,0)>0:
+   if m.message==0x0312 and m.wParam==SCREENSHOT_HOTKEY:
+    on_screenshot()
+   else:
+    u.TranslateMessage(ctypes.byref(m));u.DispatchMessageW(ctypes.byref(m))
+ finally:
+  if hotkey_registered:u.UnregisterHotKey(None,SCREENSHOT_HOTKEY)
+  hotkey_registered=False
+
+def start(on_screenshot):
  threading.Thread(target=monitor_icons,daemon=True,name='desktop-icon-bounds').start()
  threading.Thread(target=worker,daemon=True,name='wallpaper-mouse-dispatch').start()
- threading.Thread(target=run,daemon=True,name='wallpaper-desktop-input').start()
+ threading.Thread(target=run,args=(on_screenshot,),daemon=True,name='wallpaper-desktop-input').start()

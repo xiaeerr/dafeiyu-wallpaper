@@ -138,6 +138,7 @@ select{color:#d0dde7;background:#1e2a33;border:1px solid #a4b7c65c;padding:5px 8
 #astrChat #fishSend {min-width:46px;padding-inline:8px}
 #astrChat.fish-native-typing #fishInput::placeholder,#astrChat.fish-native-typing #fishSend {color:transparent;text-shadow:none}
 #astrChat .fish-image-tools {display:flex;align-items:center;flex-wrap:wrap;flex:none;gap:6px;margin-top:6px;padding-bottom:7px;border-bottom:1px solid #c1ccd338}
+#astrChat.fish-image-drag #fishInput {outline:2px solid var(--hud-control-line);outline-offset:-2px}
 #fishImagePreview {position:relative;width:64px;height:48px}
 #fishImagePreview img {width:100%;height:100%;object-fit:cover;border:1px solid var(--hud-control-line)}
 #fishImagePreview button {position:absolute;right:-7px;top:-8px;padding:0 5px;line-height:18px}

@@ -9,7 +9,7 @@
   root.id = 'astrChat';
   root.setAttribute('aria-label', '与大肥鱼聊天');
   root.innerHTML = `<div class="fish-chat-title"><span class="fish-move-grip" title="拖动聊天框">♡ 和大肥鱼说话</span><span class="fish-title-actions"><button id="fishDock" type="button" title="吸附回侧栏" aria-label="吸附回侧栏" hidden>↩</button><button id="fishSettingsButton" type="button" aria-label="打开聊天设置" aria-expanded="false">⚙</button><button id="fishToggle" type="button" aria-label="收起聊天">−</button></span></div>
-    <div id="fishBody"><form id="fishForm"><textarea id="fishInput" rows="2" maxlength="600" placeholder="想说的话…（可拖入图片）" aria-label="聊天内容"></textarea><button id="fishSend" type="submit">发送</button></form><div class="fish-image-tools"><button id="fishAddImage" type="button">＋ 图片</button><button id="fishScreen" type="button">截图并发送</button><input id="fishImageFile" type="file" accept="image/*" hidden><div id="fishImagePreview" hidden><img alt="待发送图片"><button id="fishRemoveImage" type="button" aria-label="移除图片">×</button></div></div>
+    <div id="fishBody"><form id="fishForm"><textarea id="fishInput" rows="2" maxlength="600" placeholder="想说的话…（可拖入图片）" aria-label="聊天内容"></textarea><button id="fishSend" type="submit">发送</button></form><div class="fish-image-tools"><button id="fishAddImage" type="button">＋ 图片</button><button id="fishScreen" type="button" title="截图并发送 · Shift + Alt + W">截图并发送</button><input id="fishImageFile" type="file" accept="image/*" hidden><div id="fishImagePreview" hidden><img alt="待发送图片"><button id="fishRemoveImage" type="button" aria-label="移除图片">×</button></div></div>
       <div id="fishHistory" role="log" aria-live="polite"><p class="fish-note">启动连接程序后，就可以和我聊天啦。</p></div><small id="fishStatus" role="status">等待连接</small><small id="fishVoiceStatus" role="status" hidden></small></div>
       <div id="fishSettingsOverlay" role="dialog" aria-label="聊天设置" hidden><div class="fish-settings-heading"><strong>聊天设置</strong><button id="fishSettingsClose" type="button" aria-label="关闭聊天设置">×</button></div><div class="fish-controls"><label><input id="fishActions" type="checkbox" checked> 动作回应</label><label><input id="fishIdle" type="checkbox"> 主动闲聊</label><span class="fish-voice-settings"><label><input id="fishVoice" type="checkbox"> 自动朗读</label><button id="fishOwnVoice" type="button" aria-label="允许她主动发语音" aria-pressed="false">主动语音 · 关</button></span></div>
       <div class="fish-tuning"><label>同动作间隔 <input id="fishActionCd" type="number" min="0" max="3600" step="1"> 秒</label><label>闲聊间隔 <input id="fishIdleCd" type="number" min="30" max="7200" step="10"> 秒</label></div><div class="fish-tuning"><label><input id="fishAutoScreen" type="checkbox"> 主动看桌面</label><label>看桌面间隔 <input id="fishScreenCd" type="number" min="60" max="7200" step="30"> 秒</label></div>
@@ -566,7 +566,7 @@
         let idx; while((idx=buf.indexOf('\n\n'))>=0){ const chunk=buf.slice(0,idx); buf=buf.slice(idx+2);
           const line=chunk.split('\n').find(l=>l.startsWith('data:')); if(!line)continue;
           let ev; try{ev=JSON.parse(line.slice(5).trim());}catch{continue;}
-          if(ev.image_received)status.textContent='图片已送达大肥鱼，正在等回复…';
+          if(ev.image_uploaded||ev.image_received)status.textContent='图片已上传，正在等待回复…';
           if(ev.delta){partial+=ev.delta;bubblePartial(partial);}
           if(ev.silent)silent=true;
           if(ev.reply){final=normalizeReply(ev.reply);voice=ev.voice;replyId=ev.reply_id;bubbleFinal(final,replyId);}
@@ -587,7 +587,7 @@
         return final;
       }
       throw new Error('连接中断，没有收到回复');
-    } catch(e) {lastChatError='连接失败：'+(e.name==='AbortError'?'等待超时，请重新发送':e.message);status.textContent=lastChatError;return null;} finally {clearTimeout(timeout);}
+    } catch(e) {lastChatError='发送失败：'+(e.name==='AbortError'?'等待超时，请重新发送':e.message);status.textContent=lastChatError;return null;} finally {clearTimeout(timeout);}
   }
   let revision=-1, refreshing=false;
   async function refresh(){
@@ -606,7 +606,7 @@
         history.scrollTop=follow?history.scrollHeight:oldTop;
         revision=d.revision;
       }
-      if(!processing)status.textContent=(!d.ready?d.connection?.message:null)||lastChatError||(d.ready?(demo?'已连接 AstrBot · Alt+F4 退出':'已连接 AstrBot'):'正在重连 AstrBot');
+      if(!processing)status.textContent=(!d.ready?d.connection?.message:null)||lastChatError||(pendingImage?'图片待发送 · 点击发送或按 Enter':null)||(d.ready?(demo?'已连接 AstrBot · Alt+F4 退出':'已连接 AstrBot'):'正在重连 AstrBot');
     }catch(e){if(!processing)status.textContent='连接失败：'+e.message;}
     finally{refreshing=false;}
   }
@@ -617,34 +617,127 @@
   setInterval(refresh,3000);refresh();
   const input=$('fishInput'); let composing=false;
   input.addEventListener('compositionstart',()=>composing=true);input.addEventListener('compositionend',()=>composing=false);
-  let pendingImage=null;
-  const imagePreview=$('fishImagePreview');
+  let pendingImage=null, imageDraftRevision=0, imagePreparation=null;
+  const imagePreview=$('fishImagePreview'), screenButton=$('fishScreen');
   async function imageData(file){
-    if(!file.type.startsWith('image/'))throw new Error('请选择图片文件');
     if(file.size>20*1024*1024)throw new Error('图片不能超过 20 MB');
-    const bitmap=await createImageBitmap(file);
-    const scale=Math.min(1,1600/Math.max(bitmap.width,bitmap.height));
-    const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
-    canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close();
-    return canvas.toDataURL('image/jpeg',.82).split(',')[1];
+    let bitmap;
+    try{bitmap=await createImageBitmap(file);}
+    catch{throw new Error('无法读取这张图片');}
+    try{
+      const scale=Math.min(1,1600/Math.max(bitmap.width,bitmap.height));
+      const canvas=document.createElement('canvas');
+      canvas.width=Math.max(1,Math.round(bitmap.width*scale));
+      canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+      const context=canvas.getContext('2d');
+      context.fillStyle='#fff';context.fillRect(0,0,canvas.width,canvas.height);
+      context.drawImage(bitmap,0,0,canvas.width,canvas.height);
+      return canvas.toDataURL('image/jpeg',.82).split(',')[1];
+    }finally{bitmap.close();}
   }
-  async function setImage(file){
+  function showImage(image){
+    pendingImage=image;
+    imagePreview.hidden=!image;
+    const thumbnail=imagePreview.querySelector('img');
+    if(image){
+      thumbnail.src='data:image/jpeg;base64,'+image;
+      status.textContent='图片待发送 · 点击发送或按 Enter';
+    }else thumbnail.removeAttribute('src');
+  }
+  function setImage(file){
     if(demo)return;
-    try{pendingImage=await imageData(file);imagePreview.querySelector('img').src='data:image/jpeg;base64,'+pendingImage;imagePreview.hidden=false;status.textContent='图片已加入，点击发送给大肥鱼';}
-    catch(e){status.textContent=e.message;}
+    const revision=++imageDraftRevision;
+    lastChatError='';
+    const work=imageData(file).then(image=>{
+      if(revision===imageDraftRevision)showImage(image);
+    }).catch(error=>{
+      if(revision===imageDraftRevision)status.textContent=lastChatError=error.message;
+      throw error;
+    });
+    imagePreparation=work;
+    work.catch(()=>{}).finally(()=>{if(imagePreparation===work)imagePreparation=null;});
+  }
+  function transferImage(transfer){
+    if(!transfer)return null;
+    const files=[...transfer.files];
+    return files.find(f=>f.type.startsWith('image/'))||
+      [...transfer.items].find(item=>item.kind==='file'&&item.type.startsWith('image/'))?.getAsFile()||
+      files.find(f=>/\.(?:jpe?g|png|webp|gif|bmp|avif|ico|tiff?)$/i.test(f.name))||null;
   }
   $('fishAddImage').onclick=()=>$('fishImageFile').click();
   $('fishImageFile').onchange=e=>{if(e.target.files[0])setImage(e.target.files[0]);e.target.value='';};
-  $('fishRemoveImage').onclick=()=>{pendingImage=null;imagePreview.hidden=true;imagePreview.querySelector('img').removeAttribute('src');};
-  $('fishScreen').onclick=async()=>{try{status.textContent='正在截取并发送桌面…';const r=await fetch('/desktop/screenshot',{headers:{'X-Wallpaper-Token':window.WALLPAPER_BRIDGE_TOKEN}});if(!r.ok)throw new Error('桌面截图失败');const image=await imageData(await r.blob());const text=input.value.trim();input.value='';$('fishRemoveImage').click();userSend(text||'请看看我现在的桌面画面。',image);}catch(e){status.textContent=e.message;}};
-  root.addEventListener('dragover',e=>{if([...e.dataTransfer.types].includes('Files'))e.preventDefault();});
-  root.addEventListener('drop',e=>{const file=[...e.dataTransfer.files].find(f=>f.type.startsWith('image/'));if(file){e.preventDefault();setImage(file);}});
-  function userSend(text,image=null){
-    const now=Date.now();
-    lastActivity=now; nextIdle=now+120000;
-    enqueue(async()=>{ const reply=await send(text||'请看看这张图片。',image?'我发送了一张图片'+(text?'：'+text:''):'' ,false,false,image); if(reply&&reply!=='silent'){lastAuto=Date.now();} },true);
+  $('fishRemoveImage').onclick=()=>{imageDraftRevision++;imagePreparation=null;showImage(null);};
+  input.addEventListener('paste',e=>{
+    if(demo)return;
+    const file=transferImage(e.clipboardData);
+    if(file){e.preventDefault();setImage(file);}
+  });
+  root.addEventListener('dragover',e=>{
+    if(demo||!e.dataTransfer.types.includes('Files'))return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect='copy';
+    root.classList.add('fish-image-drag');
+  });
+  root.addEventListener('dragleave',e=>{if(!root.contains(e.relatedTarget))root.classList.remove('fish-image-drag');});
+  root.addEventListener('drop',e=>{
+    root.classList.remove('fish-image-drag');
+    if(demo||!e.dataTransfer.types.includes('Files'))return;
+    e.preventDefault();
+    const file=transferImage(e.dataTransfer);
+    if(file)setImage(file);
+    else status.textContent=lastChatError='请拖入图片文件';
+  });
+  async function sendDesktopScreenshot(){
+    if(demo||screenButton.disabled)return;
+    screenButton.disabled=true;
+    try{
+      status.textContent='正在截取并发送桌面…';
+      const response=await fetch('/desktop/screenshot',{headers:{'X-Wallpaper-Token':window.WALLPAPER_BRIDGE_TOKEN},signal:AbortSignal.timeout(8000)});
+      if(!response.ok)throw new Error('桌面截图失败');
+      const image=await imageData(await response.blob());
+      const caption=input.value.trim();
+      input.value='';
+      userSend(caption||'请看看我现在的桌面画面。',image);
+    }catch(error){status.textContent=lastChatError=error.message;}
+    finally{screenButton.disabled=false;}
   }
-  $('fishForm').onsubmit=e=>{e.preventDefault();const text=input.value.trim();if((!text&&!pendingImage)||composing)return;const image=pendingImage;input.value='';$('fishRemoveImage').click();userSend(text,image);};
+  screenButton.onclick=sendDesktopScreenshot;
+  if(!pinned&&!demo)window.addEventListener('keydown',e=>{
+    if(!e.repeat&&e.shiftKey&&e.altKey&&!e.ctrlKey&&!e.metaKey&&e.code==='KeyW'){
+      e.preventDefault();sendDesktopScreenshot();
+    }
+  });
+  function userSend(text,image=null,onFailure=null){
+    const now=Date.now();lastActivity=now;nextIdle=now+120000;
+    const label=image?'我发送了一张图片'+(text?'：'+text:''):'';
+    enqueue(async()=>{
+      const reply=await send(text||'请看看这张图片。',label.slice(0,600),false,false,image);
+      if(reply&&reply!=='silent')lastAuto=Date.now();
+      else if(reply===null)onFailure?.();
+    },true);
+  }
+  let submittingDraft=false;
+  async function submitDraft(nativeText){
+    if(submittingDraft||(nativeText===undefined&&composing))return;
+    submittingDraft=true;
+    try{
+      if(imagePreparation)await imagePreparation;
+      const text=(nativeText||input.value).trim();
+      const image=pendingImage;
+      if(!text&&!image)return;
+      input.value='';
+      const revision=++imageDraftRevision;
+      showImage(null);
+      userSend(text,image,()=>{
+        if(image&&imageDraftRevision===revision&&!pendingImage){
+          showImage(image);
+          if(text&&!input.value)input.value=text;
+          status.textContent=lastChatError+=' · 图片已保留，可重试';
+        }
+      });
+    }catch{}finally{submittingDraft=false;}
+  }
+  $('fishForm').onsubmit=e=>{e.preventDefault();submitDraft();};
   input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&!composing&&e.keyCode!==229){e.preventDefault();$('fishForm').requestSubmit();}});
   const events={
     'touch.head.release':['摸摸头','（我轻轻摸了摸你的头）请自然地简短回应。'],
@@ -785,7 +878,7 @@
     return rects;
   }
   async function desktopRegions(){
-    if(preview||document.hidden)return;
+    if(!pinned||preview||document.hidden)return;
     const controls='.right-panel button:not(:disabled),#astrChat button:not(:disabled),#fishInput,.fish-chat-title,.fish-resize-grip,.fish-scroll-rail:not([aria-hidden=true]),#fishSettingsOverlay label,#settingsButton,#hugButton,#fishReplyBubble button,#settingsPanel';
     const regions=desktopRects(controls);
     const wheelRegions=desktopRects('#fishHistory,#fishSettingsOverlay,#settingsPanel,#fishReplyBubble .fish-bubble-text');
@@ -809,14 +902,22 @@
 
   let nativePolling=false;
   setInterval(async()=>{
-    if(preview||nativePolling||document.hidden)return;
+    if(!pinned||preview||nativePolling)return;
     nativePolling=true;
     try{
-      const r=await fetch('/desktop/commands',{headers:{'X-Wallpaper-Token':window.WALLPAPER_BRIDGE_TOKEN}});
+      const r=await fetch('/desktop/commands',{headers:{'X-Wallpaper-Token':window.WALLPAPER_BRIDGE_TOKEN},signal:AbortSignal.timeout(5000)});
       const d=await r.json();
       nativeTyping=!!d.typing;
       root.classList.toggle('fish-native-typing',nativeTyping);
-      for(const text of d.commands||[])userSend(text);
+      for(const command of d.commands||[]){
+        if(typeof command==='string')await submitDraft(command);
+        else if(command.kind==='send')await submitDraft(command.text);
+        else if(command.kind==='image'){
+          imageDraftRevision++;imagePreparation=null;lastChatError='';showImage(command.image);
+        }else if(command.kind==='screenshot'){
+          userSend('请看看我现在的桌面画面。',command.image);
+        }else if(command.kind==='error')status.textContent=lastChatError=command.message;
+      }
     }catch{}finally{nativePolling=false;}
   },150);
 })();
