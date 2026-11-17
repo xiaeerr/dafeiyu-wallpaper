@@ -15,6 +15,7 @@ py -3 -m venv .venv
 - `launch.pyw` 把壁纸挂到 Windows 桌面。想先看全屏效果，可运行 `.\.venv\Scripts\pythonw.exe .\demo.pyw`，按 **Alt+F4** 退出演示。
 - 首次配置时，在浏览器打开 `http://127.0.0.1:18766/` 设置 AstrBot 密钥，打开 `http://127.0.0.1:18766/app/voice-settings.html` 设置语音。平时可拖动聊天框标题栏、拉伸四边，点 **↩** 恢复原位。
 - 若要登录后启动，可在 Windows 的启动文件夹添加快捷方式，目标为虚拟环境的 `pythonw.exe`，参数为 `"仓库绝对路径\launch.pyw" --startup`。
+- 如果 Wallpaper Engine 的网页壁纸同时运行并抢占桌面层，可把 `DAFEIYU_WALLPAPER_ENGINE_EXE` 设为其 `wallpaper64.exe` 绝对路径。大肥鱼检测到 Wallpaper Engine 的网页渲染器时，会用 Wallpaper Engine 的停止命令让它让出桌面。
 
 桌面中文输入默认使用 Python 的 Tk 辅助窗口。如需使用 WinForms 版，可在仓库目录编译随附的源码：
 
@@ -23,6 +24,13 @@ py -3 -m venv .venv
 ```
 
 下次启动本地服务时会优先使用编译出的辅助程序。
+
+### 发送图片
+
+- 聊天框支持选图、粘贴截图或拖入图片，看到缩略图后按 **Enter** 或点击「发送」。可以只发图片，也可以附文字说明。图片发送失败时，待发送的图片会保留供重试。
+- 钉在桌面后，从资源管理器向输入框拖入图片需要上面的 WinForms 版输入程序。默认 Tk 输入程序支持粘贴图片，网页聊天框也可以直接接收拖放。
+- 「截图并发送」和 **Shift + Alt + W** 会立即抓取并发送桌面画面。若该组合键已被其他程序占用，可以用聊天框里的按钮。
+- AstrBot 需要支持图片的聊天模型，以及有 `file` 权限的维护密钥。看到「图片已上传」表示 AstrBot 已收到附件，模型能否读图取决于所选模型及其配置。
 
 ## 连接 AstrBot
 
